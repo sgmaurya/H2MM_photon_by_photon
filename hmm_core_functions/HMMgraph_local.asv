@@ -1,0 +1,315 @@
+% --- START OF FILE HMMgraph_local.m ---
+function HMMgraph_local()
+
+%% --- Configuration for Graph Appearance ---
+% You can adjust these parameters to fine-tune the look
+
+% --- Node Sizing (Reverted to Old Linear Scaling Method for Comparison) ---
+graph_config.node_size_method = 'linear_pop_old_style';
+graph_config.node_linear_scale_factor = 180; % Increased slightly for visibility relative to image
+graph_config.node_min_size_clamp = 7;      % Min size
+graph_config.node_max_size_clamp = 60;     % Max size
+
+% --- Edge Appearance ---
+graph_config.edge_min_width = 1.5; % Slightly thicker min width
+graph_config.edge_max_width = 7;
+graph_config.edge_width_scale_factor = 6; % Slightly increased scale factor
+graph_config.arrow_size = 15;
+graph_config.edge_label_color = [0 0 0]; % Black for edge labels
+graph_config.edge_color_mode = 'fixed';
+graph_config.fixed_edge_color = [0.4 0.4 0.4]; % Grey edges, similar to example image
+
+% --- Node Appearance (Colors & Font) ---
+graph_config.node_font_size = 11; % Font size for text INSIDE nodes
+graph_config.edge_font_size = 10; % Font size for rate labels ON edges
+graph_config.node_color_scheme = 'lines'; % 'lines' for default MATLAB colors
+
+% --- Layout ---
+graph_config.layout_style = 'force';
+% For 'force' layout, you might need to adjust node spacing if labels overlap.
+% One way is to manually adjust p.XData, p.YData after plotting or use
+% a layout that gives more control, e.g. 'layered' if appropriate.
+% For a 2-state system, 'force' usually works well. Consider increasing figure size.
+
+%% Load files
+f=figure('Name', 'HMM State Graph (Rates on Arrows)', 'Visible', 'on', 'Color', 'w', 'Position', [100 100 700 600]); % Adjusted figure size
+
+param_file = 'HMM_parm.mat';
+if ~isfile(param_file)
+    error('HMMgraph: Parameter file "%s" not found in the current directory (%s).', param_file, pwd);
+end
+loaded_params = load(param_file);
+
+essential_vars = {'Prior_HMMp', 'Prio_sort_HMMp', 'Obs_fret_values_HMMp', 'K_HMMp'};
+missing_vars = {};
+for i = 1:length(essential_vars)
+    if ~isfield(loaded_params, essential_vars{i})
+        missing_vars{end+1} = essential_vars{i}; %#ok<AGROW>
+    end
+end
+if ~isempty(missing_vars)
+    fprintf('HMMgraph: Variables in HMM_parm.mat:\n');
+    disp(fieldnames(loaded_params));
+    error('HMMgraph: Essential HMM parameters missing from HMM_parm.mat: %s', strjoin(missing_vars, ', '));
+end
+
+population1 = loaded_params.Prior_HMMp;
+population2 = loaded_params.Prio_sort_HMMp;
+FRETvalues_nodes = loaded_params.Obs_fret_values_HMMp;
+rateMat_s_inv = loaded_params.K_HMMp;
+
+HMMtypeFlag_found = false;
+loaded_flag_data = struct();
+if isfile('HMMtypeFlag.mat')
+    loaded_flag_data = load('HMMtypeFlag.mat'); HMMtypeFlag_found = true;
+    fprintf('HMMgraph: Loaded HMMtypeFlag.mat from current directory.\n');
+elseif isfile(fullfile('..','HMMtypeFlag.mat'))
+    loaded_flag_data = load(fullfile('..','HMMtypeFlag.mat')); HMMtypeFlag_found = true;
+    fprintf('HMMgraph: Loaded HMMtypeFlag.mat from parent directory.\n');
+else
+    fprintf('HMMgraph: HMMtypeFlag.mat not found. Assuming default naming.\n');
+end
+
+if HMMtypeFlag_found && isfield(loaded_flag_data, 'indx_guessmodel_for_graph')
+    indx_for_graph = loaded_flag_data.indx_guessmodel_for_graph;
+elseif HMMtypeFlag_found && isfield(loaded_flag_data, 'indx')
+    indx_for_graph = loaded_flag_data.indx;
+    fprintf('HMMgraph: Used "indx" from HMMtypeFlag.mat (old naming convention).\n');
+else
+    indx_for_graph = 1;
+    if HMMtypeFlag_found, warning('HMMgraph: Relevant index not found in HMMtypeFlag.mat. Defaulting.'); end
+end
+
+%% Validate inputs and Basic Setup
+numStates = length(population1);
+if numStates == 0, warning('HMMgraph: numStates is 0.'); title('No States'); axis off; try saveas(f, 'HMM_Graph_NoStates.png'); catch; end; if isvalid(f), close(f); end; return; end
+if ~isrow(population1), population1 = population1(:)'; end
+if ~isrow(population2), population2 = population2(:)'; end
+if size(FRETvalues_nodes,1) > 1 && size(FRETvalues_nodes,2) == 1, FRETvalues_nodes = FRETvalues_nodes'; end
+if any([length(FRETvalues_nodes), length(population2), size(rateMat_s_inv,1), size(rateMat_s_inv,2)] ~= numStates)
+    error('HMMgraph: Dimension mismatch for %d states.', numStates);
+end
+
+rateMat_for_labels_ms_inv = rateMat_s_inv * 0.001; % Rates in ms^-1 for labels
+rateMat_for_labels_ms_inv(rateMat_for_labels_ms_inv < 0) = 0;
+
+% Format edge labels (rates) - make them integers if they are close, like in the example
+formatted_edge_labels = cell(numStates, numStates);
+for i_r = 1:numStates
+    for j_c = 1:numStates
+        val_ms = rateMat_for_labels_ms_inv(i_r, j_c);
+        if i_r == j_c || val_ms == 0 % No label for diagonal or zero rates
+            formatted_edge_labels{i_r, j_c} = '';
+        else
+            % If value is very close to an integer, display as integer (like '17', '27')
+            if abs(val_ms - round(val_ms)) < 0.01 && round(val_ms) >=1 % Threshold for being "close" to integer
+                formatted_edge_labels{i_r, j_c} = sprintf('%d', round(val_ms));
+            elseif abs(val_ms) < 0.1 % For small non-integer rates
+                 formatted_edge_labels{i_r, j_c} = sprintf('%.2f', val_ms);
+            else % For other rates
+                 formatted_edge_labels{i_r, j_c} = sprintf('%.1f', val_ms);
+            end
+        end
+    end
+end
+
+rateMat_for_digraph = rateMat_s_inv;
+if numStates > 0, rateMat_for_digraph(1:numStates+1:end) = 0; end % No self-loops
+G = digraph(rateMat_for_digraph);
+if ~isempty(G.Edges) % Assign original off-diagonal s^-1 rates as weights
+    new_weights = zeros(height(G.Edges),1);
+    for k_edge = 1:height(G.Edges)
+        s_node = G.Edges.EndNodes(k_edge,1); t_node = G.Edges.EndNodes(k_edge,2);
+        new_weights(k_edge) = rateMat_s_inv(s_node, t_node);
+    end
+    G.Edges.Weight = new_weights;
+end
+
+%% Node Names
+nodeNames = cell(numStates,1);
+% Example node text: "0.7\n(62|67%)" - FRET value on first line, populations on second
+if indx_for_graph == 3 && numStates > 1 && mod(numStates,2)==0 % 3-color FRET
+    fprintf('HMMgraph: Using 3-color FRET node naming (Bright/Dark).\n');
+    halfStates = numStates/2;
+    for i=1:halfStates
+        nodeNames{i}= sprintf('%.2f\n(%.0f|%.0f%%)', FRETvalues_nodes(i), 100*population1(i), 100*population2(i)); % Bright
+        nodeNames{i+halfStates}= sprintf('%.2f\n(%.0f|%.0f%%)', FRETvalues_nodes(i+halfStates), 100*population1(i+halfStates), 100*population2(i+halfStates)); % Dark
+    end
+else % Default naming (S1, S2... or just FRET value)
+    for i=1:numStates % Mimicking example: FRET value then (Pop1|Pop2%)
+        nodeNames{i}= sprintf('%.*f\n(%.0f|%.0f%%)', ...
+                              (abs(FRETvalues_nodes(i) - round(FRETvalues_nodes(i),1))<0.01 && FRETvalues_nodes(i) ~= 0 ? 1 : 2), ... % 1 decimal if like X.0, else 2
+                              FRETvalues_nodes(i), ...
+                              100*population1(i), ...
+                              100*population2(i));
+    end
+end
+if numStates > 0, G.Nodes.Name = nodeNames; end
+
+%% Node Sizes (Old Style Linear Scaling)
+NodeSizeVec = zeros(numStates, 1);
+pop_for_sizing = population1;
+if isrow(pop_for_sizing), pop_for_sizing = pop_for_sizing'; end
+if strcmpi(graph_config.node_size_method, 'linear_pop_old_style')
+    NodeSizeVec = graph_config.node_linear_scale_factor * pop_for_sizing;
+else % Fallback to a reasonable fixed size if method changes
+    NodeSizeVec = repmat(20, numStates, 1);
+end
+NodeSizeVec(NodeSizeVec < graph_config.node_min_size_clamp) = graph_config.node_min_size_clamp;
+NodeSizeVec(NodeSizeVec > graph_config.node_max_size_clamp) = graph_config.node_max_size_clamp;
+NodeSizeVec(isnan(NodeSizeVec) | isinf(NodeSizeVec) | NodeSizeVec <=0) = graph_config.node_min_size_clamp;
+
+%% Node Colors (Matching example image: first color for higher FRET/pop, second for lower)
+NodeColorsMat = [];
+if numStates > 0
+    default_colors = get(groot,'defaultAxesColorOrder'); % e.g., blue, orange, yellow...
+    % For 2 states, try to match example: Orange for state 1 (higher FRET/pop), Blue for state 2
+    if numStates == 2
+        % Assuming FRETvalues_nodes(1) is the one with higher FRET in example
+        % or population1(1) is higher. Let's use FRET for ordering.
+        [~, fret_order] = sort(FRETvalues_nodes, 'descend'); % Higher FRET first
+        
+        temp_colors = NaN(numStates,3);
+        if size(default_colors,1) >= 2
+            temp_colors(fret_order(1),:) = default_colors(2,:); % Orange-like (MATLAB's 2nd default)
+            temp_colors(fret_order(2),:) = default_colors(1,:); % Blue-like (MATLAB's 1st default)
+        else % Fallback if not enough default colors
+            temp_colors(fret_order(1),:) = [0.8500 0.3250 0.0980]; % Manual Orange
+            temp_colors(fret_order(2),:) = [0 0.4470 0.7410];       % Manual Blue
+        end
+        NodeColorsMat = temp_colors;
+    else % For >2 states, use standard cycling
+        num_default_colors = size(default_colors, 1);
+        color_indices = mod(0:numStates-1, num_default_colors) + 1;
+        NodeColorsMat = default_colors(color_indices, :);
+    end
+else
+    NodeColorsMat = [0 0 0];
+end
+
+%% Edge Widths (Based on s^-1 rates, then scaled)
+EdgeWidthsVec = [];
+if ~isempty(G.Edges) && ~isempty(G.Edges.Weight)
+    weights_for_width_scaling = abs(G.Edges.Weight); % Use s^-1 rates for physical scaling
+    max_w = max(weights_for_width_scaling);
+    if max_w > eps
+        EdgeWidthsVec = graph_config.edge_width_scale_factor * weights_for_width_scaling / max_w + graph_config.edge_min_width;
+    else
+        EdgeWidthsVec = repmat(graph_config.edge_min_width, height(G.Edges), 1);
+    end
+    EdgeWidthsVec(EdgeWidthsVec > graph_config.edge_max_width) = graph_config.edge_max_width;
+    EdgeWidthsVec(EdgeWidthsVec < graph_config.edge_min_width) = graph_config.edge_min_width;
+    EdgeWidthsVec(isnan(EdgeWidthsVec) | isinf(EdgeWidthsVec)) = graph_config.edge_min_width;
+else
+    EdgeWidthsVec = graph_config.edge_min_width;
+end
+
+%% Plot the graph
+p = plot(G, 'Layout', graph_config.layout_style);
+
+% Apply Node properties
+p.Marker = 'o';
+if numStates > 0
+    p.NodeColor = NodeColorsMat;
+    p.MarkerSize = NodeSizeVec;
+end
+p.NodeFontSize = graph_config.node_font_size;
+p.NodeFontWeight = 'bold';
+p.NodeLabelColor = [1 1 1]; % White text inside nodes for better contrast with dark node colors
+
+% Apply Edge properties
+if ~isempty(G.Edges) && numel(G.Edges.Weight) > 0
+    p.LineWidth = EdgeWidthsVec;
+    p.ArrowSize = graph_config.arrow_size;
+    p.EdgeAlpha = 1.0; % Solid edges
+
+    % --- ENSURE EDGE LABELS ARE ASSIGNED AND VISIBLE ---
+    edgeLabelsForPlot = cell(height(G.Edges),1);
+    for ie = 1:height(G.Edges)
+        s_node = G.Edges.EndNodes(ie,1);
+        t_node = G.Edges.EndNodes(ie,2);
+        edgeLabelsForPlot{ie} = formatted_edge_labels{s_node, t_node};
+    end
+    p.EdgeLabel = edgeLabelsForPlot;
+    p.EdgeFontSize = graph_config.edge_font_size;
+    p.EdgeFontWeight = 'bold'; % Make rate labels bold
+    p.EdgeLabelColor = graph_config.edge_label_color; % Black
+
+    if strcmpi(graph_config.edge_color_mode, 'fixed')
+        p.EdgeColor = graph_config.fixed_edge_color; % Grey edges
+    else
+        p.EdgeColor = [0.4 0.4 0.4]; % Default to grey
+    end
+end
+
+% Adjust layout for 2-state to be vertical like example
+if numStates == 2 && strcmpi(graph_config.layout_style, 'force')
+    % Attempt to force a vertical layout if 'force' doesn't achieve it.
+    % This is a bit of a heuristic.
+    [~, fret_order_for_layout] = sort(FRETvalues_nodes, 'descend'); % Higher FRET on top
+    
+    y_coords = zeros(1,numStates);
+    y_coords(fret_order_for_layout(1)) = 0.5;  % Top node
+    y_coords(fret_order_for_layout(2)) = -0.5; % Bottom node
+    
+    p.XData = zeros(1,numStates); % Align horizontally
+    p.YData = y_coords;
+    
+    % May need to adjust axes limits if nodes/labels go out of bounds
+    axis(gca, 'tight'); % Recalculate axis limits
+    current_xlim = xlim; xlim(current_xlim + [-0.5 0.5]);
+    current_ylim = ylim; ylim(current_ylim + [-0.3 0.3]);
+end
+
+
+%% Title and Final Touches
+titleStr = '';
+try
+    name = pwd; sep_indices = strfind(name, filesep);
+    if ~isempty(sep_indices), folder_part = name(sep_indices(end)+1:end); else, folder_part = name; end
+    folder_part = strrep(folder_part, '_', ' '); titleStr = folder_part;
+catch
+    titleStr = 'HMM Analysis';
+end
+% Shorter title to match example image more closely
+scan_info_parts = split(titleStr,{'An',' NStates',' Run'}); % Attempt to get base name
+main_title_text = titleStr;
+if length(scan_info_parts) > 1
+    main_title_text = strtrim(strrep(scan_info_parts{1},'NScan ',''));
+    if contains(titleStr, 'PhotonByPhoton')
+        main_title_text = [main_title_text ' (PhotonByPhoton)'];
+    end
+    % Add specific Nstates info if available in folder name
+    nstates_match = regexp(titleStr, 'Nstates (\d+)', 'tokens');
+    if ~isempty(nstates_match)
+        main_title_text = [main_title_text ' ' nstates_match{1}{1} 'states'];
+    else
+        main_title_text = [main_title_text ' ' num2str(numStates) 'states']; % Fallback
+    end
+    % Add date from folder if available
+    date_match = regexp(titleStr, '\d{4}-\d{2}-\d{2}_\d{6}', 'match');
+    if ~isempty(date_match)
+        main_title_text = [main_title_text ' ' strrep(date_match{1},'_',' ')];
+    end
+end
+
+
+sub_title_text = ['(Distribution: SS|Prior), rates in ms^{-1}'];
+title({main_title_text, sub_title_text}, 'FontSize', 9, 'FontWeight', 'normal', 'Interpreter', 'tex');
+
+axis off;
+box off; % No box around the plot to match example
+set(f, 'Color', 'w');
+
+%% Save output
+output_basename = 'HMM_State_Model_RatesOnArrows';
+try
+    saveas(f, [output_basename '.fig']);
+    print(f, [output_basename '.png'], '-dpng', '-r300');
+    fprintf('HMMgraph: Saved graph as %s.fig and %s.png\n', output_basename, output_basename);
+catch ME_save_graph
+    warning('HMMgraph: Could not save graph. Error: %s', getReport(ME_save_graph, 'basic', 'hyperlinks', 'off'));
+end
+
+end
+% --- END OF FILE HMMgraph_local.m ---

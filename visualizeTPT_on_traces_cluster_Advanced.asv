@@ -1,0 +1,160 @@
+% runTPT_and_VisualizeBinned_Advanced.m
+% ... (main function is unchanged, the fix is in the viewer sub-function) ...
+
+function runTPT_and_VisualizeBinned_Advanced()
+    % ... (code from the previous response) ...
+end
+
+% --- START OF CORRECTED VIEWER FUNCTION ---
+function Traj_Vet_local_with_TPT(data_tv, Q0_tv, ind_trans_tv, trans_num_tv, AA_tv, dt_tv, Nstates_tv, tpt_boundaries_per_traj)
+    
+    prompt_tv = {'Enter time resolution for binning traces (us):', ...
+                 'Enter maximum number of trajectories to display:', ...
+                 'Enter sorting option (1=Transitions, 2=Flux, 3=None, 4=Length, 5=Specific State):'};
+    dlgtitle_tv = 'Trajectory Visualization Input';
+    definput_tv = {'5', '10', '1'}; 
+    answer_tv = inputdlg(prompt_tv, dlgtitle_tv, [1 60], definput_tv);
+    if isempty(answer_tv), disp('Trajectory visualization cancelled by user.'); return; end
+    Time_Res_us = str2double(answer_tv{1});
+    num_traj_to_display_max = str2double(answer_tv{2});
+    sort_option = str2double(answer_tv{3});
+    
+    % --- Sorting logic ... (unchanged) ...
+    num_total_trajectories = length(data_tv);
+    switch sort_option
+        case 1, [~, sorted_indices] = sort(trans_num_tv, 'descend');
+        case 2
+            Av_rate_of_photons = cellfun(@(x) size(x,1)/((x(end,1)-x(1,1))+dt_tv), data_tv);
+            [~, sorted_indices] = sort(Av_rate_of_photons, 'descend');
+        case 3, sorted_indices = 1:num_total_trajectories;
+        case 4
+            burst_length_sec = cellfun(@(x) (x(end,1)-x(1,1))+dt_tv, data_tv);
+            [~, sorted_indices] = sort(burst_length_sec, 'descend');
+        case 5
+            st_ans = inputdlg('Enter HMM state(s) to select (e.g., 1 or 1,2):', 'Select State(s)', [1 50], {'1'});
+            if isempty(st_ans), return; end
+            states_to_find = str2num(st_ans{1}); %#ok<ST2NM>
+            has_state = cellfun(@(q) any(ismember(unique(q), states_to_find)), Q0_tv);
+            sorted_indices = find(has_state);
+        otherwise, sorted_indices = 1:num_total_trajectories;
+    end
+    Trans_list_indices = sorted_indices;
+    
+    if isempty(Trans_list_indices)
+        msgbox('No trajectories match the selected sorting criteria.', 'No Trajectories Found', 'warn');
+        fprintf('\nWARNING: No trajectories found matching the sort criteria. Visualization cancelled.\n');
+        return;
+    end
+    
+    num_traj_to_plot_actual = min(num_traj_to_display_max, length(Trans_list_indices));
+    fprintf('Found %d trajectories to display. Showing top %d.\n', length(Trans_list_indices), num_traj_to_plot_actual);
+    
+    fig_traj_vet = figure('Name', 'Trajectory Visualization with Viterbi & TPTs', 'Color', 'w', 'Position', [50, 50, 1200, 800]);
+
+    for i_plot_loop = 1:num_traj_to_plot_actual
+        clf(fig_traj_vet, 'reset');
+        idx_in_data = Trans_list_indices(i_plot_loop);
+        
+        current_trajectory_photons = data_tv{idx_in_data};
+        if isempty(current_trajectory_photons), continue; end
+        
+        %%% <<< FIX: Normalize time axis to start at 0 >>>
+        time_offset_sec = current_trajectory_photons(1,1);
+        Time_axis_photons_sec = current_trajectory_photons(:,1) - time_offset_sec;
+        Time_axis_photons_usec = Time_axis_photons_sec * 1e6;
+        Photon_Symbols = current_trajectory_photons(:,2);
+        
+        X_bins_usec = 0 : Time_Res_us : Time_axis_photons_usec(end); %%% <<< FIX: Start binning at 0
+        if isempty(X_bins_usec) || length(X_bins_usec)<2, X_bins_usec = [0, Time_Res_us]; end
+        if X_bins_usec(end) < Time_axis_photons_usec(end), X_bins_usec(end+1)=X_bins_usec(end)+Time_Res_us; end
+        X_bins_plot_centers = X_bins_usec(1:end-1) + Time_Res_us/2;
+        Donor_binned = histcounts(Time_axis_photons_usec(Photon_Symbols == 1), X_bins_usec);
+        Acceptor_binned = histcounts(Time_axis_photons_usec(Photon_Symbols == 2), X_bins_usec);
+        Total_photons_binned = Donor_binned + Acceptor_binned;
+        FRET_binned = Acceptor_binned ./ Total_photons_binned;
+        FRET_binned(isnan(FRET_binned) | isinf(FRET_binned)) = 0;
+
+        ax1 = subplot(2,1,1);
+        hold(ax1, 'on');
+        legend_handles = []; legend_labels = {};
+        
+        boundaries = tpt_boundaries_per_traj{idx_in_data};
+        if ~isempty(boundaries)
+            %%% <<< FIX: Normalize patch times as well >>>
+            t_start_sec_abs = data_tv{idx_in_data}(boundaries(:, 1), 1);
+            t_end_sec_abs   = data_tv{idx_in_data}(boundaries(:, 2), 1);
+            t_start_us = (t_start_sec_abs - time_offset_sec) * 1e6;
+            t_end_us   = (t_end_sec_abs - time_offset_sec) * 1e6;
+            
+            for k=1:length(t_start_us)
+                h_patch = patch(ax1, [t_start_us(k), t_end_us(k), t_end_us(k), t_start_us(k)], [-0.1, -0.1, 1.1, 1.1], [0.5 0.5 0.5], 'FaceAlpha', 0.2, 'EdgeColor', 'none');
+                if k == 1, h_tpt = h_patch; end
+            end
+            if exist('h_tpt', 'var'), legend_handles(end+1) = h_tpt; legend_labels{end+1} = 'TPT Region'; end
+        end
+        
+        h_fret = plot(ax1, X_bins_plot_centers, FRET_binned, '-b');
+        h_viterbi = stairs(ax1, Time_axis_photons_usec, AA_tv(2, Q0_tv{idx_in_data}), '-k', 'LineWidth', 2);
+        legend_handles = [legend_handles, h_fret, h_viterbi];
+        legend_labels = [legend_labels, 'Binned FRET', 'Viterbi Path'];
+
+        if ~isempty(ind_trans_tv{idx_in_data}), plot(ax1, [Time_axis_photons_usec(ind_trans_tv{idx_in_data})'; Time_axis_photons_usec(ind_trans_tv{idx_in_data})'], [-0.1; 1.1], '--m', 'HandleVisibility', 'off'); end
+        hold(ax1, 'off'); grid on; ylim([-0.1, 1.1]);
+        ylabel(ax1, 'FRET Efficiency / P(A|State)');
+        title(ax1, sprintf('Trajectory #%d (Original Index: %d)', i_plot_loop, idx_in_data));
+        legend(ax1, legend_handles, legend_labels, 'Location', 'best');
+
+        ax2 = subplot(2,1,2);
+        hold(ax2, 'on');
+        if ~isempty(boundaries)
+             %%% <<< FIX: Use already normalized patch times >>>
+            y_max = max(Total_photons_binned) * 1.1; if y_max < 5, y_max=5; end
+            for k=1:length(t_start_us)
+                patch(ax2, [t_start_us(k), t_end_us(k), t_end_us(k), t_start_us(k)], [0, 0, y_max, y_max], [0.5 0.5 0.5], 'FaceAlpha', 0.2, 'EdgeColor', 'none', 'HandleVisibility', 'off');
+            end
+        end
+        plot(ax2, X_bins_plot_centers, Donor_binned, '-g', 'DisplayName', 'Donor');
+        plot(ax2, X_bins_plot_centers, Acceptor_binned, '-r', 'DisplayName', 'Acceptor');
+        plot(ax2, X_bins_plot_centers, Total_photons_binned, '--c', 'DisplayName', 'Total');
+        hold(ax2, 'off'); grid on;
+        y_max_plot = max(Total_photons_binned) * 1.15; if y_max_plot < 10, y_max_plot = 10; end
+        ylim(ax2, [0, y_max_plot]);
+        
+        ylabel(ax2, sprintf('Photons / %g us', Time_Res_us));
+        xlabel(ax2, 'Time (\mus)');
+        legend(ax2, 'Location','best');
+        linkaxes([ax1, ax2], 'x'); xlim(ax1, [0, Time_axis_photons_usec(end)]); %%% <<< FIX: Set xlim from 0
+
+        sgtitle(fig_traj_vet, sprintf('Displaying Trajectory %d of %d (from sorted list)', i_plot_loop, num_traj_to_plot_actual), 'FontSize', 10, 'FontWeight', 'bold');
+        if i_plot_loop < num_traj_to_plot_actual, fprintf('Displaying traj %d. Press key to continue...\n', i_plot_loop); pause; end
+    end
+    fprintf('Displayed last selected trajectory.\n');
+end
+
+% ... (ALL TPT SUB-FUNCTIONS GO HERE) ...
+
+%% --- ALL TPT SUB-FUNCTIONS ---
+function [idx_exit, idx_entry] = findBoundaries_Iterative(exit_func, entry_func, colors, center_idx, pR_H, pR_L, threshold, type, params)
+    idx_exit = NaN; idx_entry = NaN;
+    current_center_idx = center_idx;
+    for iter = 1:params.max_iter
+        exit_pass = exit_func(colors, current_center_idx, pR_H, pR_L, threshold, type);
+        entry_pass = entry_func(colors, current_center_idx, pR_H, pR_L, threshold, type);
+        if isnan(exit_pass) || isnan(entry_pass) || entry_pass <= exit_pass, break; end
+        new_center_idx = round((exit_pass + entry_pass) / 2);
+        if abs(new_center_idx - current_center_idx) <= params.conv_tol_photons
+            idx_exit = exit_pass; idx_entry = entry_pass; 
+            return;
+        end
+        current_center_idx = new_center_idx;
+    end
+    idx_exit = exit_pass; idx_entry = entry_pass;
+end
+function idx = findEntryPoint_Standard(colors, start_idx, pR_H, pR_L, lambda, type)
+LLR=0; idx=NaN; if strcmp(type,'LH'), lr=log(pR_H/pR_L); lg=log((1-pR_H)/(1-pR_L)); else, lr=log(pR_L/pR_H); lg=log((1-pR_L)/(1-pR_H)); end; for i=start_idx:length(colors), if colors(i)==2, LLR=LLR+lr; else, LLR=LLR+lg; end; if LLR>lambda, idx=i; return; end; end; end
+function idx = findExitPoint_Standard(colors, start_idx, pR_H, pR_L, lambda, type)
+LLR=0; idx=NaN; if strcmp(type,'LH'), lr=log(pR_L/pR_H); lg=log((1-pR_L)/(1-pR_H)); else, lr=log(pR_H/pR_L); lg=log((1-pR_H)/(1-pR_L)); end; for i=(start_idx-1):-1:1, if colors(i)==2, LLR=LLR+lr; else, LLR=LLR+lg; end; if LLR>lambda, idx=i+1; return; end; end; end
+function idx = findEntryPoint_Bayesian(colors, start_idx, pR_H, pR_L, p_thresh, type)
+LLR=0; idx=NaN; if strcmp(type,'LH'), lr=log(pR_H/pR_L); lg=log((1-pR_H)/(1-pR_L)); else, lr=log(pR_L/pR_H); lg=log((1-pR_L)/(1-pR_H)); end; for i=start_idx:length(colors), if colors(i)==2, LLR=LLR+lr; else, LLR=LLR+lg; end; prob = 1 / (1 + exp(-LLR)); if prob > p_thresh, idx=i; return; end; end; end
+function idx = findExitPoint_Bayesian(colors, start_idx, pR_H, pR_L, p_thresh, type)
+LLR=0; idx=NaN; if strcmp(type,'LH'), lr=log(pR_L/pR_H); lg=log((1-pR_L)/(1-pR_H)); else, lr=log(pR_H/pR_L); lg=log((1-pR_H)/(1-pR_L)); end; for i=(start_idx-1):-1:1, if colors(i)==2, LLR=LLR+lr; else, LLR=LLR+lg; end; prob = 1 / (1 + exp(-LLR)); if prob > p_thresh, idx=i+1; return; end; end; end

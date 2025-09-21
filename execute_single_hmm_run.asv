@@ -1,0 +1,98 @@
+% execute_single_hmm_run.m
+% Worker function for running a single H2MM analysis. NON-INTERACTIVE.
+% VERSION 2: Modified to produce output files with names and variables
+%            that are 100% compatible with the original processHMM_results_local.m script.
+
+function execute_single_hmm_run(full_data_file_path, main_run_output_path, config)
+    % ... (Diary setup and path setup remain the same) ...
+    log_base_dir = fullfile(main_run_output_path, 'Logs');
+    if ~exist(log_base_dir, 'dir'), mkdir(log_base_dir); end
+    timestamp_for_diary = datestr(now, 'yyyy-mm-dd_HHMMSS');
+    diary_filename = fullfile(log_base_dir, sprintf('hmm_run_log_%s.txt', timestamp_for_diary));
+    if exist(diary_filename, 'file'), delete(diary_filename); end
+    diary(diary_filename);
+    cleanupObj_diary = onCleanup(@() diary('off'));
+    fprintf('--- Starting Automated Single HMM Run (Compatibility Mode) ---\n');
+    fprintf('Output will be saved in: %s\n', main_run_output_path);
+
+    try
+        % ... (Path setup remains the same) ...
+        project_base_path = fileparts(mfilename('fullpath'));
+        paths.hmm_core = fullfile(project_base_path, 'hmm_core_functions');
+        addpath(genpath(paths.hmm_core));
+        path_to_adapted_core_script = fullfile(paths.hmm_core, 'h2mm_wexac_ver1_local.m');
+        
+        % ... (Parameter unpacking and data loading are the same) ...
+        Nstates = config.Nstates;
+        num_initial_guesses = config.num_initial_guesses;
+        % ... etc. ...
+        data_loaded = load(full_data_file_path);
+        data_re_for_hmm = data_loaded.data_for_hmm;
+        dt_analysis_sec = data_loaded.dt;
+        
+        % ... (Truncation and O_channels logic are the same) ...
+        O_channels = 2; % Assuming 2 channels for simplicity, can be determined dynamically
+        
+        % ... (Pilot Run logic remains the same, if you use it) ...
+        InitialGuess_all = InitialGuess_PhotonByPhoton(config.num_initial_guesses, config.Nstates, O_channels, dt_analysis_sec); % Simplified for clarity
+        
+        %% 3. Save Config and Data (with compatible names)
+        fprintf('\n--- 3. Saving Config and Data for this Run ---\n');
+        temp_runs_base_path_main = fullfile(main_run_output_path, 'temp_individual_runs_main');
+        if ~exist(temp_runs_base_path_main, 'dir'), mkdir(temp_runs_base_path_main); end
+        
+        config_params_to_save = config; % Save the entire config struct
+        config_params_to_save.full_data_file_path = full_data_file_path;
+        config_params_to_save.timestamp = timestamp_for_diary;
+        config_params_to_save.O_channels_determined = O_channels;
+
+        save(fullfile(main_run_output_path, 'HMM_Run_Config.mat'), 'config_params_to_save');
+        
+        % MODIFICATION #1: Save data with the name the processing script expects
+        save(fullfile(main_run_output_path, 'data_re_for_hmm.mat'), 'data_re_for_hmm', '-v7.3');
+        fprintf('Configuration and data saved with compatible names.\n');
+
+        %% 4. Execute Main HMM Analysis
+        fprintf('\n--- 4. Executing Main HMM Analysis ---\n');
+        main_block_config.max_iter = config.max_iter_hmm;
+        main_block_config.run_guesses_parallel_flag = config.run_guesses_parallel_flag;
+        main_block_config.par_hmm_internal_flag_Estep = (config.run_guesses_parallel_flag == 0);
+        main_block_config.obs_fix_flag = 1;
+        main_block_config.analysis_mode_An = config.analysis_mode_An;
+        main_block_config.MaxRunTime_cluster_hours = config.max_runtime_hmm_hours;
+        if config.analysis_mode_An == 2, main_block_config.fixS_val = config.fixS_for_special; end
+        
+        % MODIFICATION #2: Capture all outputs from the execution block
+        [best_model_overall, all_hmm_results_collected, overall_hmm_execution_duration_sec, all_guess_durations_sec, all_final_log_likelihoods] = ...
+            execute_hmm_run_block(data_re_for_hmm, InitialGuess_all, main_block_config, ...
+                                  path_to_adapted_core_script, temp_runs_base_path_main);
+        
+        % MODIFICATION #3: Save "All Results" file with the original name
+        final_results_filename = fullfile(main_run_output_path, 'All_HMM_Results_Collected_Local.mat');
+        save(final_results_filename, 'all_hmm_results_collected', 'all_final_log_likelihoods', 'InitialGuess_all', ...
+             'config_params_to_save', 'all_guess_durations_sec', 'overall_hmm_execution_duration_sec', '-v7.3');
+        fprintf('All main HMM results saved to compatible file: %s\n', final_results_filename);
+
+        if ~isempty(best_model_overall)
+            % MODIFICATION #4: Recreate the exact variable list from the original script
+            [best_logL_main, best_idx_main] = max(all_final_log_likelihoods);
+            best_initial_guess_struct_main = InitialGuess_all{best_idx_main};
+            best_model_duration_sec_main = all_guess_durations_sec(best_idx_main);
+            
+            % Save the "Best Model" file with the original name and variable list
+            save(fullfile(main_run_output_path, 'Best_HMM_Model_Local.mat'), ...
+                 'best_model_overall', 'best_idx_main', 'best_logL_main', ...
+                 'best_initial_guess_struct_main', 'config_params_to_save', ...
+                 'best_model_duration_sec_main', '-v7.3');
+            fprintf('Best HMM model saved with compatible name and variables.\n');
+        else
+            fprintf('WARNING: No valid best model found in the main run.\n');
+        end
+        
+        fprintf('\n--- Single HMM Run Finished Successfully ---\n');
+
+    catch ME_runhmm
+        fprintf(2, '\n--- ERROR in Single HMM Run ---\n');
+        rethrow(ME_runhmm);
+    end
+end

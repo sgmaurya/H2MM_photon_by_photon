@@ -1,0 +1,523 @@
+% processHMM_results_local.m
+% This script processes HMM output, specifically adapting to the folder
+% structure created by runHMM_Nstates_Scan.m. It allows selection of a
+% specific Nstates run from a scan session for detailed analysis.
+
+function processHMM_results_local()
+    clearvars -except break_debug; 
+    close all;                     
+    clc;                           
+
+    fprintf('--- Starting HMM Results Processing (for Nstates Scan Output) ---\n');
+
+    %% 0. Setup Paths (Optional, if not already managed by startup.m)
+    project_base_path = fileparts(mfilename('fullpath')); 
+    paths.hmm_core = fullfile(project_base_path, 'hmm_core_functions'); 
+    % Add paths if they are not persistently on the MATLAB path
+    if exist(paths.hmm_core, 'dir') && isempty(strfind(path, paths.hmm_core)) %#ok<STREMP>
+        addpath(genpath(paths.hmm_core));
+        fprintf('INFO: Added hmm_core_functions to path for this session.\n');
+    end
+    
+    original_pwd = pwd; % Store original directory
+    % Use onCleanup to ensure directory is changed back even if errors occur
+    cleanupObj_cd = onCleanup(@() cd(original_pwd)); % Needs original_pwd to be in scope
+
+    try 
+%% 1. Select Nstates Scan Session and Specific Nstates Run
+        fprintf('\n--- 1. Selecting HMM Scan Session and Nstates Run ---\n');
+        
+        % Define base path for Nstates Scan results
+        nscan_results_base_path = fullfile(project_base_path, 'HMM_Nstates_Scan_Results');
+        if ~exist(nscan_results_base_path, 'dir')
+            % Fallback if NScan results are not in the expected subfolder
+            alt_path_check = uigetdir(project_base_path, 'HMM_Nstates_Scan_Results not found. Select base folder for NScan_* directories');
+            if isequal(alt_path_check,0), error('Nstates Scan results base directory not specified.'); end
+            nscan_results_base_path = alt_path_check;
+        end
+        
+        selected_scan_session_path = uigetdir(nscan_results_base_path, 'Select the TOP-LEVEL NScan_* session directory');
+        if isequal(selected_scan_session_path, 0), disp('User cancelled scan session selection. Exiting.'); error('Scan session selection cancelled.'); end 
+        fprintf('Selected Scan Session Directory: %s\n', selected_scan_session_path);
+
+        % List Nstates_XX_Run subfolders within the selected scan session
+        nstate_run_folders = dir(fullfile(selected_scan_session_path, 'Nstates_*_Run'));
+        nstate_run_folder_names = {nstate_run_folders([nstate_run_folders.isdir]).name}; % Get only directory names
+        nstate_run_folder_paths = fullfile(selected_scan_session_path, nstate_run_folder_names); % Full paths
+        
+        if isempty(nstate_run_folder_names)
+            error('No Nstates_XX_Run subfolders found in the selected scan session: %s. Ensure the scan completed and created these folders.', selected_scan_session_path);
+        end
+
+        [indx_nstate_run, tf_nstate_run] = listdlg('ListString', nstate_run_folder_names, ...
+                                                   'SelectionMode', 'single', ...
+                                                   'Name', 'Select Specific Nstates Run to Process', ...
+                                                   'PromptString', 'Select which Nstates results to analyze in detail:', ...
+                                                   'ListSize', [350 250]);
+        if ~tf_nstate_run, disp('User cancelled Nstates run selection. Exiting.'); error('Nstates run selection cancelled.'); end
+        
+        selected_nstate_run_folder_name = nstate_run_folder_names{indx_nstate_run};
+        selected_nstate_run_path = nstate_run_folder_paths{indx_nstate_run}; % Use full path
+        
+        fprintf('Processing results for Nstates run: %s\n', selected_nstate_run_path);
+        
+        % --- Change current directory to the selected Nstates_XX_Run subfolder ---
+        % The onCleanup object will change it back to original_pwd upon exit/error
+        cd(selected_nstate_run_path); 
+        fprintf('Changed current directory to: %s\n', selected_nstate_run_path);
+
+        % --- Load results from the current Nstates_XX_Run folder ---
+        % Extract Nstate number from folder name to construct the results filename
+        n_str_from_folder_match = regexp(selected_nstate_run_folder_name, 'Nstates_(\d+)_Run', 'tokens');
+        if isempty(n_str_from_folder_match) || isempty(n_str_from_folder_match{1})
+            error('Could not parse Nstates number from folder name: %s. Expected format Nstates_XX_Run.', selected_nstate_run_folder_name);
+        end
+        nstate_number_str_for_file = n_str_from_folder_match{1}{1}; 
+        
+        nstate_results_file_name = sprintf('All_HMM_Results_N%s.mat', nstate_number_str_for_file);
+        if ~exist(nstate_results_file_name, 'file')
+            error('Results file "%s" not found in directory: %s. This file should contain results for all guesses for this Nstate.', nstate_results_file_name, selected_nstate_run_path);
+        end
+        fprintf('Loading HMM results from: %s (within Nstates run folder)...\n', nstate_results_file_name);
+        loaded_nstate_data_struct = load(nstate_results_file_name);
+        
+        % Extract variables saved by runHMM_Nstates_Scan.m for this Nstate
+        if ~isfield(loaded_nstate_data_struct, 'cur_N_all_hmm_res')
+            error('Variable "cur_N_all_hmm_res" not found in loaded file: %s. Check saved variable names from runHMM_Nstates_Scan.', nstate_results_file_name);
+        end
+        all_hmm_results_collected = loaded_nstate_data_struct.cur_N_all_hmm_res;
+
+        if ~isfield(loaded_nstate_data_struct, 'cur_N_all_LLs') % Note: runHMM_Nstates_Scan saves as cur_N_all_LLs_val
+            if isfield(loaded_nstate_data_struct, 'cur_N_all_LLs_val')
+                 all_final_log_likelihoods = loaded_nstate_data_struct.cur_N_all_LLs_val;
+            else
+                error('Variable "cur_N_all_LLs" or "cur_N_all_LLs_val" not found in loaded file: %s.', nstate_results_file_name);
+            end
+        else
+             all_final_log_likelihoods = loaded_nstate_data_struct.cur_N_all_LLs;
+        end
+        
+        % InitialGuess_all_loaded_for_this_N is for reference if needed by other parts
+        if isfield(loaded_nstate_data_struct, 'IG_cur_N_orig')
+            InitialGuess_all_loaded_for_this_N = loaded_nstate_data_struct.IG_cur_N_orig; 
+        else
+            warning('PROCESS_HMM: Variable "IG_cur_N_orig" (original initial guesses) not found in %s.', nstate_results_file_name);
+            InitialGuess_all_loaded_for_this_N = {};
+        end
+
+        if ~isfield(loaded_nstate_data_struct, 'cfg_n_sv_val') 
+            error('Variable "cfg_n_sv_val" (N-state specific config) not found in %s.', nstate_results_file_name);
+        end
+        config_this_nstate_run = loaded_nstate_data_struct.cfg_n_sv_val; 
+        
+        if ~isfield(config_this_nstate_run, 'N')
+            error('Field "N" (for current_Nstates) not found in N-state specific config (cfg_n_sv_val) from %s.', nstate_results_file_name);
+        end
+        Nstates = config_this_nstate_run.N; % This is the Nstates for the run being processed
+
+        % --- Load overall scan configuration from the PARENT (main scan session) directory ---
+        overall_config_file_path = fullfile(selected_scan_session_path, 'NScan_Overall_Config.mat');
+        if ~exist(overall_config_file_path, 'file')
+            error('NScan_Overall_Config.mat not found in the main scan session directory: %s. This file is needed for dt, topology etc.', selected_scan_session_path);
+        end
+        fprintf('Loading overall scan configuration from: %s...\n', overall_config_file_path);
+        overall_cfg_struct = load(overall_config_file_path, 'scan_config_params');
+        if ~isfield(overall_cfg_struct, 'scan_config_params')
+            error('"scan_config_params" struct not found in NScan_Overall_Config.mat. Check how it was saved by runHMM_Nstates_Scan.');
+        end
+        scan_config_params_loaded = overall_cfg_struct.scan_config_params;
+        
+                % Extract essential parameters from the overall scan config
+        if ~isfield(scan_config_params_loaded, 'dt_analysis_sec') % CORRECTED FIELD NAME
+            error('Field "dt_analysis_sec" not found in loaded scan_config_params. Check how NScan_Overall_Config.mat was saved.'); 
+        end
+        dt = scan_config_params_loaded.dt_analysis_sec; % CORRECTED FIELD NAME
+
+        if ~isfield(scan_config_params_loaded, 'indx_guessmodel') % CORRECTED FIELD NAME (was idx_GM)
+             if isfield(scan_config_params_loaded, 'idx_GM') % Check for old name as fallback
+                indx_guessmodel_for_graph = scan_config_params_loaded.idx_GM;
+                warning('Found old field name "idx_GM" for guess model index. Using it, but prefer "indx_guessmodel".');
+             else
+                error('Field "indx_guessmodel" (or "idx_GM") not found in scan_config_params.'); 
+             end
+        else
+            indx_guessmodel_for_graph = scan_config_params_loaded.indx_guessmodel; % CORRECTED FIELD NAME
+        end
+
+        if ~isfield(scan_config_params_loaded, 'guessName_scan') % CORRECTED FIELD NAME (was GM_name)
+            if isfield(scan_config_params_loaded, 'GM_name') % Check for old name
+                guessName_for_graph = scan_config_params_loaded.GM_name;
+                warning('Found old field name "GM_name" for guess name. Using it, but prefer "guessName_scan".');
+            else
+                error('Field "guessName_scan" (or "GM_name") not found in scan_config_params.');
+            end
+        else
+            guessName_for_graph = scan_config_params_loaded.guessName_scan; % CORRECTED FIELD NAME
+        end
+
+        % --- Load data_re_for_hmm.mat from the PARENT (main scan session) directory ---
+        data_re_file_path = fullfile(selected_scan_session_path, 'data_re_for_hmm.mat');
+        if ~exist(data_re_file_path, 'file')
+            error('data_re_for_hmm.mat not found in the main scan session directory: %s. Ensure runHMM_Nstates_Scan.m saved this file.', selected_scan_session_path);
+        end
+        fprintf('Loading trajectory data (data_re_for_hmm.mat) from: %s...\n', data_re_file_path);
+        loaded_traj_data = load(data_re_file_path, 'data_re_for_hmm'); 
+        if ~isfield(loaded_traj_data, 'data_re_for_hmm') || isempty(loaded_traj_data.data_re_for_hmm)
+            error('Variable "data_re_for_hmm" not loaded or is empty from %s.', data_re_file_path);
+        end
+
+        fprintf('DEBUG: Size of loaded "data" (data_re_for_hmm): %d x %d cell array.\n', size(data,1), size(data,2));
+if isempty(data)
+    warning('DEBUG: "data" variable is empty after loading!');
+else
+    fprintf('DEBUG: Number of trajectories in "data": %d\n', length(data));
+    if length(data) > 0 && ~isempty(data{1})
+        fprintf('DEBUG: First trajectory in "data" has %d photons.\n', size(data{1},1));
+    elseif length(data) > 0 && isempty(data{1})
+         fprintf('DEBUG: First trajectory in "data" is empty.\n');
+    end
+end
+
+        data = loaded_traj_data.data_re_for_hmm; % Use 'data' as the variable name for HMM processing scripts
+
+        if isempty(all_hmm_results_collected)
+            error('No HMM results were loaded (all_hmm_results_collected is empty) for the selected Nstates run. Aborting.');
+        end
+        fprintf('INFO: Successfully loaded all necessary data and configurations for Nstates=%d.\n', Nstates);
+%% 2. Find Best Model for the selected Nstates and Perform Recoloring
+        fprintf('\n--- 2. Finding Best Model (for Nstates=%d) and Performing Recoloring ---\n', Nstates);
+        
+        % --- DEBUG CHECK for 'data' variable (loaded in Section 1) ---
+        if ~exist('data', 'var') || isempty(data) || ~iscell(data)
+            error('CRITICAL DEBUG: "data" (from data_re_for_hmm) is not defined, empty, or not a cell array at start of Section 2.');
+        else
+            fprintf('DEBUG (Start of Sec 2): "data" contains %d trajectories.\n', length(data));
+            if length(data) > 0 && ~isempty(data{1})
+                fprintf('DEBUG (Start of Sec 2): First trajectory in "data" has %d photons.\n', size(data{1},1));
+            elseif length(data) > 0 && isempty(data{1})
+                 fprintf('DEBUG (Start of Sec 2): First trajectory in "data" is empty.\n');
+            end
+        end
+        % --- END DEBUG CHECK for 'data' ---
+
+        num_guesses_this_N = length(all_final_log_likelihoods);
+        if num_guesses_this_N == 0
+            error('No log-likelihoods found for Nstates=%d. Cannot select best model.', Nstates); 
+        end
+
+        valid_ll_indices = find(isfinite(all_final_log_likelihoods)); 
+
+        if isempty(valid_ll_indices)
+            error('All HMM runs for Nstates=%d resulted in non-finite LogLikelihoods (NaN or Inf). Cannot proceed.', Nstates);
+        end
+        
+        fig_ll_plot = figure('Name', sprintf('LogL vs InitialGuess (Nstates=%d)',Nstates), 'Visible', 'off');
+        plot(1:num_guesses_this_N, all_final_log_likelihoods, 'o-', 'MarkerSize', 8, 'LineWidth', 1);
+        hold on;
+        plot(valid_ll_indices, all_final_log_likelihoods(valid_ll_indices), 'ro', 'MarkerSize', 8, 'LineWidth', 1.5, 'MarkerFaceColor', 'r');
+        xlabel('Initial Guess #'); ylabel('Final Log-Likelihood');
+        title(sprintf('Log-Likelihoods of HMM Runs (Nstates=%d)', Nstates)); grid on; 
+        
+        [max_ll_value, idx_in_valid_ll] = max(all_final_log_likelihoods(valid_ll_indices));
+        auto_selected_ass = valid_ll_indices(idx_in_valid_ll); 
+        
+        plot(auto_selected_ass, max_ll_value, 'bp', 'MarkerSize', 12, 'MarkerFaceColor', 'b');
+        hold off;
+        try
+            saveas(fig_ll_plot, 'LogLikelihood_vs_InitialGuess.png');
+            if isvalid(fig_ll_plot), close(fig_ll_plot); end 
+            fprintf('LogLikelihood vs Initial Guess plot saved as LogLikelihood_vs_InitialGuess.png (in Nstates_%02d_Run folder)\n', Nstates);
+        catch ME_save_ll_plot
+            warning('Could not save LogLikelihood_vs_InitialGuess.png. Error: %s', getReport(ME_save_ll_plot, 'basic'));
+            if isvalid(fig_ll_plot), close(fig_ll_plot); end 
+        end
+        
+        ass = auto_selected_ass; 
+        fprintf('Automatically selected best guess #%d for Nstates=%d with LogL: %.4f.\n', ass, Nstates, max_ll_value);
+        
+        if ass < 1 || ass > length(all_hmm_results_collected) || isempty(all_hmm_results_collected{ass})
+             error('Selected best guess #%d is invalid or has empty results in all_hmm_results_collected.', ass);
+        end
+        best_model_params_struct = all_hmm_results_collected{ass}; % This struct has prior0, transmat0, obsmat0
+
+        model_for_recoloring = struct(); 
+        model_for_recoloring.Nstates = Nstates;
+        if isfield(best_model_params_struct, 'prior0'), model_for_recoloring.prior = best_model_params_struct.prior0; 
+        elseif isfield(best_model_params_struct, 'prior'), model_for_recoloring.prior = best_model_params_struct.prior;
+        else, error('Prior field (prior0 or prior) not found for guess #%d, N=%d', ass, Nstates); end
+        if isfield(best_model_params_struct, 'transmat0'), model_for_recoloring.transmat = best_model_params_struct.transmat0; 
+        elseif isfield(best_model_params_struct, 'transmat'), model_for_recoloring.transmat = best_model_params_struct.transmat;
+        else, error('Transmat field (transmat0 or transmat) not found for guess #%d, N=%d', ass, Nstates); end
+        if isfield(best_model_params_struct, 'obsmat0'), model_for_recoloring.obsmat = best_model_params_struct.obsmat0;   
+        elseif isfield(best_model_params_struct, 'obsmat'), model_for_recoloring.obsmat = best_model_params_struct.obsmat;     
+        else, error('Obsmat field (obsmat0 or obsmat) not found for guess #%d, N=%d', ass, Nstates); end
+
+        Realization_number = 5; 
+        fprintf('Performing recoloring with %d realizations...\n', Realization_number);
+        if ~exist('GenSimRecolored_hist.m', 'file'), error('GenSimRecolored_hist.m not found on MATLAB path.'); end
+        
+        Recolored_FRET_data = {}; % Initialize
+        photon_color_recolored = {}; % Initialize
+        try
+            [~, photon_color_recolored, Recolored_FRET_data] = GenSimRecolored_hist(data, model_for_recoloring, Realization_number);
+        catch ME_recolor
+            disp('--- Model struct passed to GenSimRecolored_hist ---'); disp(model_for_recoloring);
+            error('Error during GenSimRecolored_hist: %s\nCheck model struct fields & data format.', ME_recolor.message); 
+        end
+        fprintf('Recoloring complete.\n');
+
+        % --- FRET Histogram Plotting and Parameter Sorting/Saving ---
+        fprintf('Generating FRET histograms...\n');
+        
+        fret_data_all_traj = cell(length(data), 1);
+        for i_traj_fret = 1:length(data)
+            if ~isempty(data{i_traj_fret}) && size(data{i_traj_fret},1) > 0 
+                num_acceptor = nnz(data{i_traj_fret}(:,2)==2); % Assuming channel 2 is Acceptor
+                num_donor = nnz(data{i_traj_fret}(:,2)==1);   % Assuming channel 1 is Donor
+                total_photons_in_burst = num_acceptor + num_donor;
+                if total_photons_in_burst > 0
+                    fret_data_all_traj{i_traj_fret} = num_acceptor / total_photons_in_burst;
+                else, fret_data_all_traj{i_traj_fret} = NaN; end
+            else, fret_data_all_traj{i_traj_fret} = NaN; end
+        end
+        fret_data = cell2mat(fret_data_all_traj); 
+        fret_data(isnan(fret_data) | isinf(fret_data)) = []; 
+        
+        % --- DEBUG CHECK for fret_data ---
+        if ~exist('fret_data', 'var')
+            error('CRITICAL DEBUG: "fret_data" variable was not created!');
+        else
+            fprintf('DEBUG: "fret_data" created. Is empty? %d. Size: %s.\n', isempty(fret_data), mat2str(size(fret_data)));
+            if ~isempty(fret_data) && length(fret_data) < 20, fprintf('DEBUG: fret_data values: %s\n', mat2str(fret_data));
+            elseif ~isempty(fret_data), fprintf('DEBUG: fret_data has %d elements.\n', numel(fret_data)); end
+        end
+        % --- END DEBUG CHECK for fret_data ---
+
+        Recolored_FRET_all = []; 
+        if ~isempty(Recolored_FRET_data) && iscell(Recolored_FRET_data)
+            try Recolored_FRET_all = cat(2, Recolored_FRET_data{:}); 
+            catch ME_cat_recolor, warning('Could not concatenate Recolored_FRET_data. Err: %s.', getReport(ME_cat_recolor,'basic')); Recolored_FRET_all = []; end
+        elseif ~isempty(Recolored_FRET_data) && isnumeric(Recolored_FRET_data), Recolored_FRET_all = Recolored_FRET_data; end
+        if ~isempty(Recolored_FRET_all), Recolored_FRET_all(isnan(Recolored_FRET_all) | isinf(Recolored_FRET_all)) = []; end
+        
+        fig_recolor_hist = figure('Name', sprintf('FRET Histograms (N=%d, Guess #%d)', Nstates, ass), 'Color', 'w', 'Position', [150, 150, 700, 500], 'Visible', 'off');
+        ax_hist = axes(fig_recolor_hist); hold(ax_hist, 'on');
+        bin_width = 0.02; edges = -0.01:bin_width:1.01; 
+        centers_for_hist = edges(1:end-1) + bin_width/2;
+        data_face_color = [0.2 0.5 0.8]; data_edge_color = data_face_color * 0.7; 
+        recolor_color = [0.8 0.2 0.2]; lw_recolor = 1.5; 
+        max_pdf_val = 0;
+
+        if ~isempty(fret_data) % This is line 302 (approx) where the error occurred
+            h_fret = histcounts(fret_data, edges, 'Normalization', 'pdf'); 
+            bar(ax_hist, centers_for_hist, h_fret, 1, 'FaceColor', data_face_color, 'EdgeColor', data_edge_color, 'FaceAlpha', 0.7, 'DisplayName', 'Original Data');
+            if ~isempty(h_fret), max_pdf_val = max(max_pdf_val, max(h_fret(:))); end % Ensure h_fret is not empty for max
+        else, fprintf('WARNING: No FRET data from original trajectories to plot histogram.\n'); end
+
+        if ~isempty(Recolored_FRET_all)
+            h_recoloring = histcounts(Recolored_FRET_all, edges, 'Normalization', 'pdf');
+            stairs(ax_hist, centers_for_hist, h_recoloring, 'LineWidth', lw_recolor, 'Color', recolor_color, 'DisplayName', sprintf('Recolored Model (%d real.)', Realization_number));
+             if ~isempty(h_recoloring), max_pdf_val = max(max_pdf_val, max(h_recoloring(:))); end % Ensure h_recoloring is not empty
+        else, fprintf('WARNING: No Recolored FRET data to plot histogram.\n'); end
+        
+        fprintf('Arranging and saving sorted model parameters...\n');
+        obsmat_to_sort = model_for_recoloring.obsmat; 
+        prior_to_sort = model_for_recoloring.prior;   
+        transmat_to_sort = model_for_recoloring.transmat;
+        Obs_fret_values_sorted_row = []; B_sort_idx_final = 1:Nstates; Obsmat_sorted_final = obsmat_to_sort;
+        if Nstates > 0 && size(obsmat_to_sort,1)==Nstates && size(obsmat_to_sort,2) >= 2
+            [Obs_fret_values_sorted_row, B_sort_idx_final] = sort(obsmat_to_sort(:,2)'); 
+            Obsmat_sorted_final = obsmat_to_sort(B_sort_idx_final, :);
+        elseif Nstates > 0, warning('Obsmat <2 cols or Nstates mismatch. Using unsorted obsmat.'); if size(obsmat_to_sort,2)>=1, Obs_fret_values_sorted_row=obsmat_to_sort(:,1)'; else Obs_fret_values_sorted_row=NaN(1,Nstates);end;end
+        Prio_sorted_row = prior_to_sort(B_sort_idx_final); if size(Prio_sorted_row,1)>1, Prio_sorted_row=Prio_sorted_row'; end
+        Trans_sorted_final = transmat_to_sort(B_sort_idx_final, B_sort_idx_final);
+        K_matrix_sorted = (Trans_sorted_final - eye(Nstates)) / dt; 
+        Prior_steady_state_row = ones(1,Nstates)/Nstates; 
+        if Nstates > 0 && ~isempty(Trans_sorted_final), try [evc_ss,evl_d_ss]=eig(Trans_sorted_final');evl_c_ss=diag(evl_d_ss);[~,idx1_ss]=min(abs(evl_c_ss-1));if~isempty(idx1_ss),ssvc_ss=evc_ss(:,idx1_ss(1));if sum(ssvc_ss)~=0,ssvc_ss=ssvc_ss/sum(ssvc_ss);end;psstmp_ss=real(ssvc_ss);psstmp_ss(psstmp_ss<1e-9)=0;if sum(psstmp_ss)>1e-9,Prior_steady_state_row=psstmp_ss'/sum(psstmp_ss);else warning('SS sum small.');end;end;catch ME_ss_calc,warning('No SS prior: %s. Use sorted HMM prior.',getReport(ME_ss_calc,'basic'));Prior_steady_state_row=Prio_sorted_row;end;end
+        AA = [B_sort_idx_final; Obs_fret_values_sorted_row]; save('AA.mat','AA');
+        Obs_HMMp=Obsmat_sorted_final;Trans_HMMp=Trans_sorted_final;Prior_HMMp=Prior_steady_state_row;K_HMMp=K_matrix_sorted;Prio_sort_HMMp=Prio_sorted_row;Obs_fret_values_HMMp=Obs_fret_values_sorted_row;
+        save('HMM_parm.mat','Obs_HMMp','Trans_HMMp','Prior_HMMp','K_HMMp','Prio_sort_HMMp','Obs_fret_values_HMMp');
+        Est_K=K_HMMp;Est_B_idx=B_sort_idx_final;Est_Prio_sort=Prio_sort_HMMp;Est_Obs_fret=Obs_fret_values_HMMp;Est_Prior_steady=Prior_HMMp;Est_Trans_sorted=Trans_HMMp;Est_selected_guess_idx=ass;Est_Obsmat_sorted=Obsmat_sorted_final;
+        save('Est.mat','Est_K','Est_B_idx','Est_Prio_sort','Est_Obs_fret','Est_Prior_steady','Est_Trans_sorted','Est_selected_guess_idx','Est_Obsmat_sorted');
+        fprintf('Sorted HMM parameters saved (HMM_parm.mat, Est.mat, AA.mat).\n');
+
+        state_line_color=[0.5 0.5 0.5]; state_ls='--'; state_lw=1.5;
+        if ~isempty(Obs_fret_values_sorted_row)
+            y_lims_for_lines=get(ax_hist,'YLim'); 
+            if isempty(y_lims_for_lines) || y_lims_for_lines(2)<=0, y_lims_for_lines=[0 max(1, max_pdf_val*1.1)]; if isempty(y_lims_for_lines(2))||y_lims_for_lines(2)<=1e-9, y_lims_for_lines(2)=1;end;end % Ensure y_lims_for_lines(2) is positive
+            for i_s_line=1:length(Obs_fret_values_sorted_row)
+                ln_fret_val=Obs_fret_values_sorted_row(i_s_line);
+                plot(ax_hist,[ln_fret_val,ln_fret_val],y_lims_for_lines,'Color',state_line_color,'LineStyle',state_ls,'LineWidth',state_lw,'HandleVisibility','off');
+                text(ax_hist,ln_fret_val+0.01,y_lims_for_lines(2)*0.9,sprintf('S%d(%.2f)',B_sort_idx_final(i_s_line),ln_fret_val),'Color','k','FontSize',9,'FontWeight','bold');
+            end
+            fprintf('INFO:Marked %d FRET states on the histogram.\n',length(Obs_fret_values_sorted_row));
+        end
+        hold(ax_hist,'off');xlabel(ax_hist,'FRET Efficiency','FontSize',12,'FontWeight','bold'); ylabel(ax_hist,'Probability Density','FontSize',12,'FontWeight','bold');
+        xlim(ax_hist,[-0.05 1.05]);
+        ylim_current_final_plot=get(ax_hist,'YLim'); 
+        if ylim_current_final_plot(2)>0, ylim(ax_hist,[0,ylim_current_final_plot(2)]); else ylim(ax_hist,[0 1]);end
+        legend(ax_hist,'show','Location','NorthEast','FontSize',10,'Box','on');
+        title(ax_hist,sprintf('FRET Distribution: Data vs. Recolored Model (N=%d, Guess #%d)',Nstates,ass),'FontWeight','bold','FontSize',14);
+        grid(ax_hist,'on');box(ax_hist,'on');set(ax_hist,'FontSize',10);
+        
+        try 
+            saveas(fig_recolor_hist,'FRET_Histogram_Recolored.png');
+            rc_fn='recoloring_output.mat';
+            recoloring_photon_color = photon_color_recolored; 
+            recoloring_FRET_per_realization = Recolored_FRET_data; 
+            if exist(rc_fn,'file'),save(rc_fn,'fret_data','Recolored_FRET_all','recoloring_FRET_per_realization','recoloring_photon_color','model_for_recoloring','ass','Realization_number','Obs_fret_values_sorted_row','B_sort_idx_final','-append');
+            else, save(rc_fn,'fret_data','Recolored_FRET_all','recoloring_FRET_per_realization','recoloring_photon_color','model_for_recoloring','ass','Realization_number','Obs_fret_values_sorted_row','B_sort_idx_final');end
+            fprintf('Recoloring results & figure saved.\n');
+        catch ME_src_final,warning('FAIL_SAVE_RECOLOR_FIG_DATA:%s',getReport(ME_src_final,'basic'));end
+        if isvalid(fig_recolor_hist),close(fig_recolor_hist);end
+        % --- End of FRET histogram and param sorting ---
+        %% 3. Call HMMgraph
+        fprintf('\n--- 3. Generating HMM Graph ---\n');
+        try 
+            save('HMMtypeFlag.mat', 'indx_guessmodel_for_graph', 'guessName_for_graph'); 
+            fprintf('INFO: Created HMMtypeFlag.mat for HMMgraph (indx=%d, name=%s).\n', indx_guessmodel_for_graph, guessName_for_graph);
+            if ~exist('HMMgraph.m', 'file'), warning('HMMGRAPH_NOT_FOUND', 'HMMgraph.m not found. Skipping graph generation.');
+            else, HMMgraph; fprintf('HMM graph generation attempted.\n'); end
+        catch ME_graph, warning('HMMGRAPH_FAIL', 'Failed to generate HMM graph. Error: %s', getReport(ME_graph, 'basic')); end 
+        if exist('HMMtypeFlag.mat', 'file'), try delete('HMMtypeFlag.mat'); fprintf('INFO: Cleaned up HMMtypeFlag.mat.\n'); catch; end; end
+
+        fprintf('\n--- HMM Results Processing Finished Successfully for Nstates=%d ---\n', Nstates);
+
+        %% 4. Optional: Replot Nstates Scan Summary (AIC/BIC plot)
+        fprintf('\n--- 4. Optional: Replotting Nstates Scan Summary ---\n');
+        summary_file_path = fullfile(selected_scan_session_path, 'NScan_Results_Summary.mat');
+        overall_config_file_for_plot_title = fullfile(selected_scan_session_path, 'NScan_Overall_Config.mat');
+
+        if exist(summary_file_path, 'file') && exist(overall_config_file_for_plot_title, 'file')
+            fprintf('Found Nstates scan summary file. Attempting to replot AIC/BIC...\n');
+            try
+                summary_data = load(summary_file_path, 'results_summary');
+                config_data_for_plot = load(overall_config_file_for_plot_title, 'scan_config_params');
+                
+                if isfield(summary_data, 'results_summary') && isfield(config_data_for_plot, 'scan_config_params')
+                    results_summary_table = summary_data.results_summary;
+                    scan_cfg_for_plot = config_data_for_plot.scan_config_params;
+                    
+                    file_name_data_for_plot_title = 'Unknown (config missing original data filename)';
+                    if isfield(scan_cfg_for_plot, 'full_data_file_path') && ~isempty(scan_cfg_for_plot.full_data_file_path)
+                        [~, name_temp, ext_temp] = fileparts(scan_cfg_for_plot.full_data_file_path);
+                        file_name_data_for_plot_title = [name_temp, ext_temp];
+                    end
+
+                    fig_replot_aic_bic = figure('Name', 'Replot: Nstates Scan AIC/BIC', 'Position', [200, 200, 900, 600], 'Visible', 'on'); % Make visible
+                    
+                    yyaxis left;
+                    plot(results_summary_table.Nstates, results_summary_table.AIC, 'bo-', 'LineWidth',1.5,'MarkerSize',8, 'DisplayName', 'AIC');
+                    ylabel('AIC');
+                    hold on;
+                    
+                    [min_aic_val_replot, idx_min_aic_replot] = min(results_summary_table.AIC);
+                    min_aic_N_replot = NaN;
+                    if ~isempty(min_aic_val_replot) && isfinite(min_aic_val_replot) && idx_min_aic_replot > 0 && idx_min_aic_replot <= height(results_summary_table)
+                        min_aic_N_replot = results_summary_table.Nstates(idx_min_aic_replot);
+                        plot(min_aic_N_replot, min_aic_val_replot,'bp','MarkerSize',12,'MarkerFaceColor','b', 'DisplayName', sprintf('Min AIC (N=%d)', min_aic_N_replot));
+                        text(min_aic_N_replot, min_aic_val_replot, sprintf(' Min AIC (N=%d)', min_aic_N_replot),'VerticalAlignment','bottom','HorizontalAlignment','right');
+                    end
+                    
+                    yyaxis right;
+                    plot(results_summary_table.Nstates, results_summary_table.BIC, 'ro-', 'LineWidth',1.5,'MarkerSize',8, 'DisplayName', 'BIC');
+                    ylabel('BIC');
+                    
+                    [min_bic_val_replot, idx_min_bic_replot] = min(results_summary_table.BIC);
+                    min_bic_N_replot = NaN;
+                    if ~isempty(min_bic_val_replot) && isfinite(min_bic_val_replot) && idx_min_bic_replot > 0 && idx_min_bic_replot <= height(results_summary_table)
+                        min_bic_N_replot = results_summary_table.Nstates(idx_min_bic_replot);
+                        plot(min_bic_N_replot, min_bic_val_replot,'rp','MarkerSize',12,'MarkerFaceColor','r', 'DisplayName', sprintf('Min BIC (N=%d)', min_bic_N_replot));
+                        text(min_bic_N_replot, min_bic_val_replot, sprintf(' Min BIC (N=%d)', min_bic_N_replot),'VerticalAlignment','top','HorizontalAlignment','right');
+                    end
+                    
+                    hold off;
+                    xlabel('Number of States (Nstates)');
+                    title(sprintf('AIC and BIC vs. Nstates (Data: %s)',strrep(file_name_data_for_plot_title,'_','\_')));
+                    
+                    legend_handles_replot = findobj(gca, '-regexp', 'DisplayName', '[^'']'); 
+                    if ~isempty(legend_handles_replot), legend(legend_handles_replot, 'Location','best', 'Interpreter', 'none'); end
+                    grid on; box on;
+                    
+                    fprintf('AIC/BIC plot replotted. You can save it manually if needed.\n');
+                    % Optionally save it automatically again in the current Nstates_XX_Run folder
+                    % saveas(fig_replot_aic_bic, 'NScan_AIC_BIC_Replot.png');
+                else
+                    warning('Could not find results_summary or scan_config_params in loaded summary/config files.');
+                end
+            catch ME_replot
+                warning('Failed to replot AIC/BIC summary. Error: %s', getReport(ME_replot, 'basic'));
+            end
+        else
+            fprintf('Nstates scan summary file (NScan_Results_Summary.mat) not found in parent directory. Skipping AIC/BIC replot.\n');
+        end
+        % --- End of Optional Replotting ---
+        
+    catch ME_main_process 
+        fprintf(2, 'ERROR in processHMM_results_local: %s\n', ME_main_process.message);
+        fprintf(2, 'Stack Trace:\n%s\n', getReport(ME_main_process, 'extended', 'hyperlinks','off'));
+        if strcmp(get(0,'Diary'),'on')
+            fprintf('DIARY_ERROR: Error in processHMM_results_local: %s\n', ME_main_process.message);
+            fprintf('DIARY_ERROR: Stack Trace:\n%s\n', getReport(ME_main_process, 'extended', 'hyperlinks','off'));
+        end
+    end 
+    
+    % cd(original_pwd); % This is handled by onCleanup object
+    fprintf('Returned to original directory: %s\n', original_pwd);
+
+
+        
+
+end
+
+% --- Helper function extract_trajectory_cell_scan ---
+function final_traj_cell = extract_trajectory_cell_scan(input_var_name, loaded_var)
+    final_traj_cell = {}; 
+    if ~iscell(loaded_var), if ~isempty(loaded_var), fprintf('INFO (extract_helper): "%s" is not type cell as expected.\n', input_var_name); end; return; end
+    if isempty(loaded_var), fprintf('INFO (extract_helper): "%s" is an empty cell.\n', input_var_name); return; end
+    temp_data = loaded_var; nest_lvl = 0; max_nest = 3;
+    while iscell(temp_data) && numel(temp_data)==1 && iscell(temp_data{1}) && nest_lvl < max_nest, temp_data=temp_data{1}; nest_lvl=nest_lvl+1; end
+    % if nest_lvl > 0, fprintf('INFO (extract_helper): Unwrapped "%s" %d levels.\n', input_var_name, nest_lvl); end % Optional: too verbose
+    if iscell(temp_data) && ~isempty(temp_data)
+        peek = temp_data{1};
+        if isnumeric(peek) && (isempty(peek) || (ismatrix(peek) && size(peek,2)>=2))
+            processed_trajectories = cell(size(temp_data)); valid_c = 0;
+            for k=1:numel(temp_data)
+                traj_d = temp_data{k};
+                if isnumeric(traj_d) && (isempty(traj_d) || (ismatrix(traj_d) && size(traj_d,2)>=2))
+                    valid_c=valid_c+1;
+                    if ~isempty(traj_d), processed_trajectories{valid_c} = traj_d(:,1:2); else, processed_trajectories{valid_c} = zeros(0,2); end
+                elseif ~isempty(traj_d)
+                    warning('EXTRACT_HELPER: Element %d in "%s" not numeric NxM (M>=2). Skipping.', k, input_var_name);
+                end
+            end
+            final_traj_cell = processed_trajectories(1:valid_c);
+        elseif iscell(peek)
+            % fprintf('INFO (extract_helper): "%s" is cell of cells. Concatenating.\n', input_var_name); % Optional: verbose
+            concatenated = {};
+            for k_o=1:numel(temp_data)
+                inner_c = temp_data{k_o};
+                if iscell(inner_c)
+                    for k_i=1:numel(inner_c)
+                        traj_d_i = inner_c{k_i};
+                        if isnumeric(traj_d_i) && (isempty(traj_d_i)||(ismatrix(traj_d_i)&&size(traj_d_i,2)>=2))
+                            if ~isempty(traj_d_i), concatenated{end+1}=traj_d_i(:,1:2); else, concatenated{end+1}=zeros(0,2); end %#ok<AGROW>
+                        elseif ~isempty(traj_d_i)
+                             warning('EXTRACT_HELPER: Inner element of "%s" (outer %d, inner %d) not numeric NxM (M>=2). Skipping.', input_var_name, k_o, k_i);
+                        end
+                    end
+                elseif ~isempty(inner_c)
+                     warning('EXTRACT_HELPER: Outer element %d of "%s" not a cell. Skipping batch.', k_o, input_var_name);
+                end
+            end
+            final_traj_cell = concatenated;
+        else 
+             if ~isempty(temp_data) && ~isempty(peek), warning('EXTRACT_HELPER: Format of "%s" not recognized. First el class: %s.', input_var_name, class(peek)); end
+             final_traj_cell = {};
+        end
+    else 
+        if iscell(temp_data) && isempty(temp_data), % fprintf('INFO (extract_helper): "%s" is empty cell array after unwrap.\n', input_var_name); % Optional
+        else, warning('EXTRACT_HELPER: Var "%s" not cell after unwrap, or unsupp. struct. Final class: %s.', input_var_name, class(temp_data)); end
+        final_traj_cell = {};
+    end
+end
