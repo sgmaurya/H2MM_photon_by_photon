@@ -1,3 +1,5 @@
+% test edit from MATLAB source control
+
 % Traj_Vet_local.m
 % Visualizes trajectories with Viterbi decoded paths.
 % Takes data, Q0, transition info, AA matrix, dt, and Nstates as arguments.
