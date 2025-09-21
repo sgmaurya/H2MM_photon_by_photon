@@ -1,0 +1,14 @@
+# MATLAB / temp / data
+*.asv
+*.autosave
+*.m~
+*.bak
+*.log
+*.tmp
+*.mat
+*.mex*
+*.fig
+*.slx
+*.mdl
+output/
+data/
